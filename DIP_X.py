@@ -55,10 +55,14 @@ def img_iter(cam_path, head):
 
 
 out_put: VIDEOStruct= None
-clahe = cv2.createCLAHE(2.0, (int(640/480*6), 6))
+size = (640, 480)
+clahe = cv2.createCLAHE(2.0, (int(size[0]/size[1]*6), 6))
 orbs = {}
 shifts = {}
 images = iter(img_iter(cam_path, 'blue-'))
+similar0 = 0.6
+pads = (50, 40)
+mask = np.zeros(size[::-1], dtype=np.uint8)
 
 getROICenter = lambda roi: (roi[0]+roi[2]/2, roi[1]+roi[3]/2)
 areaROI = lambda roi: roi[2]*roi[3]
@@ -75,35 +79,108 @@ def getROICross(*rois, xs=[], ys=[]):
     l = len(rois)
     return (xs[l], ys[l], xs[l+1], ys[l+1])
 
-transform_roi = lambda xyxy: (xyxy[0], xyxy[1], xyxy[2] - xyxy[0], xyxy[3] - xyxy[1])
-transform_xyxy = lambda roi: np.int16((roi[0], roi[1], roi[2] + roi[0], roi[3] + roi[1]))
+similarROI = lambda roi1, roi2: (cross := areaROI(transform_roi(getROICross(roi1, roi2)))) / max(1, areaROI(roi1) + areaROI(roi2) - cross)
+inROI = lambda center, roi: roi[0] <= center[0] <= roi[0]+roi[2] and roi[1] <= center[1] <= roi[1]+roi[3]
+cutROI = lambda img, roi: img[roi[1]: roi[1]+roi[3], roi[0]: roi[0]+roi[2]]
 
-similarROI = lambda roi1, roi2: areaROI(transform_roi(getROICross(roi1, roi2))) / areaROI()
+def grap_cutROI(image, roi, mask=None):
+    # 定义背景模型和前景模型
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+    # 应用 GrabCut 算法
+    m,bg,fg=cv2.grabCut(image, mask, roi, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+    return m
 
-while cv2.waitKey(1) != ord('q'):
-    c = next(images)
-    gray = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
-    gray = clahe.apply(gray, )
-    rois = cv2.selectROIs('raw', c, )
-    for roi in rois:
-        imdst = gray[roi[1]: roi[1]+roi[3], roi[0]: roi[0]+roi[2]]
-        # Find in Old objects
-        for orb in orbs:
-            Mask, good, corners = orb(imdst)
-            if Mask is not None:
-                break
-        else:
+try:
+    while True:
+        c = next(images)
+        gray = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
+        gray = clahe.apply(gray, )
+        hsv = cv2.cvtColor(c, cv2.COLOR_RGB2HSV)
+        rois = cv2.selectROIs('raw', c, )
+        ids = list(range(len(rois)))
+
+        for Id, roi in zip(ids, rois):
             center = getROICenter(roi)
-            for shift in shifts:
-                if shift.box
+            # imdst = cutROI(gray, roi)
+            mask.fill(0)
+            grap_cutROI(c, roi, mask)
+            mask = ((mask == 1) | (mask == 3)).view(np.uint8)
+            np.putmask(mask, mask.view(bool), 255)
+            roi_pad = padROI(roi, pads, size)
+            gray_roi = cutROI(gray&mask, roi)
+            cv2.imshow('gray roi', gray_roi)
+            # cv2.waitKey(0)
+            # Find in Old objects
+            try:
+                for ID, orb in orbs.items():
+                    # if inROI(center, shift.box):
+                    if similarROI(roi, orb.get_roi(size)) > similar0:
+                        orb.set_dst(gray_roi)
+                        orb.pos = center
+                        Id = ID
+                        break
+                    # Mask, good, corners = orb(imdst)
+                    # if Mask is not None:
+                    #     break
+                else:
+                    if Id in orbs:
+                        orbs[Id].set_dst(gray_roi)
+                        orbs[Id].pos = center
+                    else:
+                            orb = FeatureStruct(gray_roi, method='ORB')
+                            orb.pos = center
+                            orbs[Id] = orb
+            except ValueError:
+                pass
+
+            mask_roi = cutROI(mask, roi_pad)
+            hsv_roi = cutROI(hsv, roi_pad)
+            colors = ShiftStruct.scan_inRange(hsv_roi, mask_roi)
+            m = ~mask_roi
+            np.putmask(hsv_roi[:,:,0], m, 0)
+            np.putmask(hsv_roi[:,:,1], m, 0)
+            np.putmask(hsv_roi[:,:,2], m, 0)
+            print(roi, roi_pad, colors)
+            cv2.imshow('hsv', cv2.cvtColor(hsv_roi, cv2.COLOR_HSV2RGB))
+            # cv2.waitKey(0)
+            if colors[0] is not None and colors[1] is not None:
+                for ID, shift in shifts.items():
+                    if similarROI(roi, shift.get_roi(size)) > similar0:
+                        shift.init_frame(hsv_roi, (roi[0] - roi_pad[0], roi[1] - roi_pad[1], roi[2], roi[3]), colors)
+                        shift.pos = center
+                        Id = ID
+                        break
+                else:
+                    if Id in shifts:
+                        shifts[Id].init_frame(hsv_roi, (roi[0] - roi_pad[0], roi[1] - roi_pad[1], roi[2], roi[3]), colors)
+                        shifts[Id].pos = center
+                    else:
+                        shift = ShiftStruct(hsv_roi, (roi[0] - roi_pad[0], roi[1] - roi_pad[1], roi[2], roi[3]), colors, mode='mean')
+                        shift.pos = center
+                        shifts[Id] = shift
+            else:
+                pass
 
 
-    for i in range(10):  # simulate YOLO as lower speed
-        imshow('Feature', orb.draw(c, Mask, good, corners))
-        mask = cv2.Canny(c, threshold1, threshold2)
-        imshow('canny', mask)
+        for i in range(30):  # simulate YOLO as lower speed
+            c = next(images)
+            gray = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
+            clahe.apply(gray, gray)
+            for orb in orbs.values():
+                roi_pad = padROI(orb.get_roi(size), pads, size)
+                gray_roi = cutROI(gray, roi_pad)
+                Mask, good, corner = orb(gray_roi)
+                orb.draw(cutROI(c, roi_pad), None, good, corner)
 
-        c = cv2.GaussianBlur(c, (gauss_brush_size,gauss_brush_size), gauss_brush_sigma)
-        cv2.imshow('raw', c)
-        hist = shift(c)
+            for shift in shifts.values():
+                roi_pad = padROI(shift.get_roi(size), pads, size)
+                shift(cutROI(c, roi_pad))
+                xyxy_hsv = transform_xyxy(shift.get_roi(size))
+                cv2.rectangle(c, xyxy_hsv[:2], xyxy_hsv[2:], 255, 2)
 
+            cv2.imshow('det', c)
+            out_put.write(c)
+
+except StopIteration:
+    pass

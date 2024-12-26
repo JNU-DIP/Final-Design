@@ -136,6 +136,11 @@ class VIDEOStruct:
         self.close()
 
 
+transform_roi = lambda xyxy: (xyxy[0], xyxy[1], xyxy[2] - xyxy[0], xyxy[3] - xyxy[1])
+transform_xyxy = lambda roi: np.int16((roi[0], roi[1], roi[2] + roi[0], roi[3] + roi[1]))
+padROI = lambda roi, pads, size: (max(roi[0]-pads[0],0), max(roi[1]-pads[1],0), min(roi[0]+roi[2]+pads[0],size[0]), min(roi[1]+roi[3]+pads[1],size[1]))
+
+
 class ShiftStruct:
     def __init__(self, init_frame=None, box=None, colors=None, pad=100, counts=10, mode='Cam'):
         # set up the termination criteria, either 10 iteration or move by at least 1 pt
@@ -146,6 +151,7 @@ class ShiftStruct:
         self.padding = pad
         self.src = init_frame
         self.roi_hist = None
+        self.pos = [0, 0]
         if init_frame is not None:
             self.init_frame(init_frame)
 
@@ -170,6 +176,14 @@ class ShiftStruct:
         self.box = box
         return mask
 
+    def get_roi(self, size):
+        xyxy = transform_xyxy(self.box)
+        xyxy.resize((2, 2))
+        wh = self.src.shape[1]/2, self.src.shape[0]/2
+        xyxy = (*np.maximum(xyxy.min(axis=0) - wh + self.pos, 0),
+                *np.minimum(xyxy.max(axis=0) - wh + self.pos, size))
+        return tuple(map(int, transform_roi(xyxy)))
+
     def __call__(self, frame, box=None, colors=None):
         if box is not None:
             self.init_frame(frame, box, colors)
@@ -177,6 +191,9 @@ class ShiftStruct:
             colors = self.colors
         timer = cv2.getTickCount()
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        if self.src.shape != frame.shape:
+            self.src = np.zeros_like(frame, shape=frame.shape[:2])
+
         cv2.calcBackProject([hsv], [0], self.roi_hist, [0, 180], 1, self.src)
         np.putmask(self.src, ~cv2.inRange(hsv, colors[0], colors[1]), 0)
         ret, box = self.model(self.src, self.box, self.term_crit)
@@ -303,16 +320,25 @@ class FeatureStruct:
         # https://docs.opencv.org/4.7.0/dc/dc3/tutorial_py_matcher.html
         self.matcher = cv2.FlannBasedMatcher(index_params, search_params)
         # self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        self.dst_image = dst_image
-        if dst_image.ndim == 3:
-            dst_image = cv2.cvtColor(dst_image, cv2.COLOR_BGR2GRAY)
-        self.kp1, self.desc1 = self.orb.detectAndCompute(dst_image, None)
-        if self.desc1 is None:
-            raise ValueError('Can not detect dst image.')
         self.min_mum = min_mum
         self.low_rate = low_rate
         self.max_error = max_error
         self.confidence = confidence
+        self.matrix = np.eye(3, dtype=np.float32)
+        self.area_rate = area_rate
+        self.method = method
+        self.pos = [0, 0]
+        self.set_dst(dst_image)
+        self.corners = np.zeros_like(self.corner)
+
+    def set_dst(self, dst_image):
+        if dst_image.ndim == 3:
+            dst_image = cv2.cvtColor(dst_image, cv2.COLOR_BGR2GRAY)
+        kp1, desc1 = self.orb.detectAndCompute(dst_image, None)
+        if desc1 is None:
+            raise ValueError('Can not detect dst image.')
+        self.dst_image = dst_image
+        self.kp1, self.desc1 = kp1, desc1
         h, w = dst_image.shape  # src
         self.corner = np.float32([
             [0, 0],
@@ -321,9 +347,12 @@ class FeatureStruct:
             [w-1, 0],
             [w/2, h/2]
         ]).reshape(-1, 1, 2)
-        self.matrix = np.eye(3, dtype=np.float32)
-        self.area_rate = area_rate
-        self.method = method
+
+    def get_roi(self, size):
+        corners = self.corners[:, 0, :]
+        xyxy = (*np.maximum(corners.min(axis=0) - corners[4] + self.pos, 0),
+                *np.minimum(corners.max(axis=0) - corners[4] + self.pos, size))
+        return tuple(map(int, transform_roi(xyxy)))
 
     def __call__(self, image):
         if image.ndim == 3:
@@ -365,7 +394,7 @@ class FeatureStruct:
             # y_i" = (H[1,0] *x_i + H[1,1] *y_i + H[1,2]) / (H[2,0] *x_i + H[2,1] *y_i + H[2,2])
             # error = \sum{(x_i' - x_i")^2 + (y_i' - y_i")^2}
             # {0,0} -> {H[0,2]/H[2,2], H[1,2]/H[2,2]} -> {x0, y0}
-            corners = cv2.perspectiveTransform(self.corner, self.matrix)
+            self.corners = corners = cv2.perspectiveTransform(self.corner, self.matrix)
             nc = corners[:, 0, :]
             h, w = image.shape[:2]
             # print(nc[:4, :2].astype(np.int16).tolist())
@@ -384,7 +413,7 @@ class FeatureStruct:
         return Mask, good, corners
 
     def draw(self, image, Mask, good, corners):
-        if Mask:
+        if corners is not None:
             # 应用透视变换
             nc = corners[:, 0, :]
             h, w = image.shape[:2]
@@ -398,12 +427,13 @@ class FeatureStruct:
         else:
             print("Not enough matches are found - {}/{}".format(len(good), self.min_mum))
 
-        draw_params = dict(matchColor=(0, 255, 0),  # draw matches in green color
-                           singlePointColor=None,
-                           matchesMask=Mask,  # draw only inliers
-                           flags=2)
-        img = cv2.drawMatches(self.dst_image, self.kp1, image, self.kp2, good, None, **draw_params)
-        return img
+        if Mask:
+            draw_params = dict(matchColor=(0, 255, 0),  # draw matches in green color
+                               singlePointColor=None,
+                               matchesMask=Mask,  # draw only inliers
+                               flags=2)
+            image = cv2.drawMatches(self.dst_image, self.kp1, image, self.kp2, good, None, **draw_params)
+        return image
 
 
 class Patrol:
