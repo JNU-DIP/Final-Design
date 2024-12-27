@@ -138,7 +138,7 @@ class VIDEOStruct:
 
 transform_roi = lambda xyxy: (xyxy[0], xyxy[1], xyxy[2] - xyxy[0], xyxy[3] - xyxy[1])
 transform_xyxy = lambda roi: np.int16((roi[0], roi[1], roi[2] + roi[0], roi[3] + roi[1]))
-padROI = lambda roi, pads, size: (max(roi[0]-pads[0],0), max(roi[1]-pads[1],0), min(roi[0]+roi[2]+pads[0],size[0]), min(roi[1]+roi[3]+pads[1],size[1]))
+padROI = lambda roi, pads, size: transform_roi((max(roi[0]-pads[0],0), max(roi[1]-pads[1],0), min(roi[0]+roi[2]+pads[0],size[0]), min(roi[1]+roi[3]+pads[1],size[1])))
 
 
 class ShiftStruct:
@@ -191,11 +191,11 @@ class ShiftStruct:
             colors = self.colors
         timer = cv2.getTickCount()
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        if self.src.shape != frame.shape:
+        if self.src.shape != frame.shape[:2]:
             self.src = np.zeros_like(frame, shape=frame.shape[:2])
 
         cv2.calcBackProject([hsv], [0], self.roi_hist, [0, 180], 1, self.src)
-        np.putmask(self.src, ~cv2.inRange(hsv, colors[0], colors[1]), 0)
+        # np.putmask(self.src, ~cv2.inRange(hsv, colors[0], colors[1]), 0)
         ret, box = self.model(self.src, self.box, self.term_crit)
         self.box = box
         self.fps = cv2.getTickFrequency() / (cv2.getTickCount() - timer)
@@ -203,10 +203,10 @@ class ShiftStruct:
 
     @staticmethod
     def scan_inRange(hsv, mask, rate=1.2, dead_band=(0., 0., 0.)):
-        size, _size = np.histogram(mask, bins=2)[0]
+        _size, size = np.histogram(mask, bins=2)[0]
         _mask = ~mask
         rate = 1 / rate
-        hsvL = np.array([0, 0, 0], dtype=np.uint8)
+        hsvL = np.array([0, 20, 30], dtype=np.uint8)
         hsvH = np.array([180, 255, 255], dtype=np.uint8)
         hist_i = cv2.calcHist([hsv], [0], mask, [180], [0, 180])
         hist_i *= 1 / size
@@ -229,10 +229,10 @@ class ShiftStruct:
         hsvH[0] = Hic
         hsvL[0] = Lic
 
-        hist_i = cv2.calcHist([hsv], [1], mask, [256], [0, 256])
+        hist_i = cv2.calcHist([hsv], [1], mask, [256], [0, 255])
         hist_i *= 1 / size
         hist_i = np.diff(hist_i, prepend=0)
-        hist_b = cv2.calcHist([hsv], [1], _mask, [256], [0, 256])
+        hist_b = cv2.calcHist([hsv], [1], _mask, [256], [0, 255])
         hist_b *= 1 / _size
         hist_b = np.diff(hist_b, prepend=0)
         Lic = Hic = hist_i.argmax()
@@ -240,13 +240,25 @@ class ShiftStruct:
         hist_r += dead_band[1]
         in_range = hist_i >= hist_b
         if not in_range[Hic]:
-            return None, None
-        while in_range[Hic]:
-            if Hic == 255: break
-            Hic += 1
-        while in_range[Lic]:
-            if Lic <= 10: break
-            Lic -= 1
+            Lic = 0
+            Hic = 255
+            Mic = hist_i.argmax()
+            while hist_i[Lic] < hist_i[Mic]*0.5:
+                Lic += 1
+                if Lic >= Mic:
+                    return hsvL, None
+            while hist_i[Hic] < hist_i[Mic]*0.5:
+                Hic -= 1
+                if Hic <= Mic:
+                    return hsvL, None
+        else:
+            while in_range[Hic]:
+                if Hic == 255: break
+                Hic += 1
+            while in_range[Lic]:
+                if Lic <= 20:
+                    return hsvL, None
+                Lic -= 1
         hsvH[1] = Hic
         hsvL[1] = Lic
 
@@ -261,13 +273,25 @@ class ShiftStruct:
         hist_r += dead_band[2]
         np.greater_equal(hist_i, hist_b, out=in_range)
         if not in_range[Hic]:
-            return None, None
-        while in_range[Hic]:
-            if Hic == 255: break
-            Hic += 1
-        while in_range[Lic]:
-            if Lic <= 20: break
-            Lic -= 1
+            Lic = 0
+            Hic = 255
+            Mic = hist_i.argmax()
+            while hist_i[Lic] < hist_i[Mic]*0.5:
+                Lic += 1
+                if Lic >= Mic:
+                    return None, hsvH
+            while hist_i[Hic] < hist_i[Mic]*0.5:
+                Hic -= 1
+                if Hic <= Mic:
+                    return None, hsvH
+        else:
+            while in_range[Hic]:
+                if Hic == 255: break
+                Hic += 1
+            while in_range[Lic]:
+                if Lic <= 30:
+                    return None, hsvH
+                Lic -= 1
         hsvH[2] = Hic
         hsvL[2] = Lic
         return hsvL, hsvH
@@ -296,6 +320,12 @@ def find_corners(img, nums=25, min_confidence=0.1, distance=10):
 
 def triangle_area(p1, p2, p3):
     return 0.5 * abs((p2[0]-p1[0]) * (p3[1]-p1[1]) - (p2[1]-p1[1]) * (p3[0]-p1[0]))
+
+def triangle_rote(p1, p2, p3):
+    p1 = p1 - p2
+    p3 = p3 - p2
+    if np.all(p1 == 0) or np.all(p3 == 0): return -1
+    return np.arccos(np.sum(p1 * p3) / np.sqrt(np.sum(p1*p1) * np.sum(p3*p3)))
 
 
 class FeatureStruct:
@@ -408,6 +438,9 @@ class FeatureStruct:
                 pass
             elif triangle_area(nc[0], nc[1], nc[2])+triangle_area(nc[0], nc[2], nc[3]) <= h*w*self.area_rate:
                 pass
+            elif not np.isclose(triangle_rote(nc[0], nc[1], nc[2])+triangle_rote(nc[1], nc[2], nc[3])
+                +triangle_rote(nc[2], nc[3], nc[0])+triangle_rote(nc[3], nc[0], nc[1]), 2*np.pi, 0, 1e-1):
+                pass
             else:
                 Mask = mask.ravel().tolist()
         return Mask, good, corners
@@ -419,12 +452,13 @@ class FeatureStruct:
             h, w = image.shape[:2]
             for i, p in enumerate(nc):
                 cv2.circle(image, (int(p[0]), int(p[1])), 5+2*i, (255,255,0), 3)
-            print(f'w:{nc[4,0]/w:.2f}',
-                  f'h:{nc[4,1]/h:.2f}',
-                  f'area: {triangle_area(nc[0], nc[1], nc[2]):.0f}+{triangle_area(nc[0], nc[2], nc[3]):.0f}')
+            if good:
+                print(f'w:{nc[4,0]/w:.2f}',
+                      f'h:{nc[4,1]/h:.2f}',
+                      f'area: {triangle_area(nc[0], nc[1], nc[2]):.0f}+{triangle_area(nc[0], nc[2], nc[3]):.0f}')
             # Draw a rect when matched out it
             image = cv2.polylines(image, [np.int32(corners[:4])], True, 255, 3, cv2.LINE_AA)
-        else:
+        elif good is not None:
             print("Not enough matches are found - {}/{}".format(len(good), self.min_mum))
 
         if Mask:
