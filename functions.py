@@ -296,6 +296,16 @@ class ShiftStruct:
         hsvL[2] = Lic
         return hsvL, hsvH
 
+    @staticmethod
+    def cluster(image, spatial_radius=10, color_radius=20, max_iter=10, hsv=False):
+        if not hsv:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        image = cv2.pyrMeanShiftFiltering(image, spatial_radius, color_radius,
+                                              termcrit=(max_iter // 2, max_iter, 0.1))
+        if not hsv:
+            cv2.cvtColor(image, cv2.COLOR_HSV2BGR, image)
+        return image
+
     def draw(self, frame):
         ret = self(frame)
         # Draw it on image

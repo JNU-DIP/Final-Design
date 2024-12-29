@@ -2,7 +2,7 @@
 
 import os
 import random
-
+import time
 import numpy as np
 import cv2
 from functions import *
@@ -62,6 +62,7 @@ class YOLOv8(YOLO):
         super().__init__(model, **kwargs)
         self.objs = []
         self.verbose = kwargs.get('verbose', True)
+        self.results = None
 
     @staticmethod
     # 计算检测框的中心点，便于后续显示
@@ -74,10 +75,10 @@ class YOLOv8(YOLO):
 
     def __call__(self, frame):
         # YOLO 跟踪
-        results = self.track(frame, persist=True, tracker="bytetrack.yaml", max_det=8, verbose=self.verbose)[0]
+        self.results = self.track(frame, persist=True, tracker="bytetrack.yaml", max_det=8, verbose=self.verbose)[0]
         self.objs.clear()
         # print(results.boxes.id, results.boxes.data[:, 4])
-        for detection in results.boxes.data:
+        for detection in self.results.boxes.data:
             if len(detection) < 7:
                 confidence, cls = detection[4:6]
                 obj_id = -1
@@ -89,6 +90,10 @@ class YOLOv8(YOLO):
             self.objs.append((obj_id, cls, detection[:4]))
         return self.objs
 
+    def draw(self, image):
+        if self.results:
+            image = self.results.plot(img=image, conf=True, )
+        return image
 
 
 out_put: VIDEOStruct= None
@@ -96,11 +101,12 @@ size = (640, 480)
 clahe = cv2.createCLAHE(2.0, (int(size[0]/size[1]*6), 6))
 orbs = {}
 shifts = {}
+grap_models = {}
 images = iter(img_iter(cam_path, 'blue-'))
 similar0 = 0.6
 pads = (50, 40)
 mask = np.zeros(size[::-1], dtype=np.uint8)
-yolo = YOLOv8(verbose=False)
+yolo = YOLOv8(verbose=True)
 
 getROICenter = lambda roi: (roi[0]+roi[2]/2, roi[1]+roi[3]/2)
 areaROI = lambda roi: roi[2]*roi[3]
@@ -121,12 +127,10 @@ similarROI = lambda roi1, roi2: (cross := areaROI(transform_roi(getROICross(roi1
 inROI = lambda center, roi: roi[0] <= center[0] <= roi[0]+roi[2] and roi[1] <= center[1] <= roi[1]+roi[3]
 cutROI = lambda img, roi: img[roi[1]: roi[1]+roi[3], roi[0]: roi[0]+roi[2]]
 
-def grap_cutROI(image, roi, mask=None):
+def grap_cutROI(image, roi, bgd_model, fgd_model, mask=None):
     # 定义背景模型和前景模型
-    bgd_model = np.zeros((1, 65), np.float64)
-    fgd_model = np.zeros((1, 65), np.float64)
     # 应用 GrabCut 算法
-    m,bg,fg=cv2.grabCut(image, mask, roi, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+    m,bg,fg=cv2.grabCut(image, mask, roi, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT)
     np.putmask(mask, mask == 1, 255)
     np.putmask(mask, mask == 3, 255)
     np.putmask(mask, mask == 0, 0)
@@ -136,24 +140,30 @@ def grap_cutROI(image, roi, mask=None):
 try:
     while True:
         c = next(images)
+        cv2.GaussianBlur(c, (gauss_brush_size,gauss_brush_size), gauss_brush_sigma, c)
         hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
         gray = hsv[:,:,2] = clahe.apply(hsv[:,:,2], )
         cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR, c)
+        # hsv1 = ShiftStruct.cluster(hsv, color_radius=10, hsv=True)
+        # gray=hsv1[:,:,2]
         # rois = cv2.selectROIs('raw', c, )
         # ids = list(range(len(rois)))
         objs = yolo(c)
         ids = [obj[0] for obj in objs]
         rois = [transform_roi(obj[2].cpu().numpy().astype(np.uint16)) for obj in objs]
         print(ids, rois)
-
+        t0 = time.thread_time_ns()
         for Id, roi in zip(ids, rois):
             center = getROICenter(roi)
             # imdst = cutROI(gray, roi)
             mask.fill(0)
-            grap_cutROI(c, roi, mask)
+            mask0=cutROI(mask, roi)
+            mask0[:]=255
+            # grap_models.setdefault(Id, (np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)))
+            # grap_cutROI(ShiftStruct.cluster(c), roi, *grap_models[Id], mask)
             roi_pad = padROI(roi, pads, size)
             gray_roi = cutROI(gray&mask, roi)
-            cv2.imshow('gray roi', gray_roi)
+            # cv2.imshow('gray roi', gray_roi)
             # cv2.waitKey(0)
             # Find in Old objects
             try:
@@ -210,7 +220,7 @@ try:
             else:
                 pass
 
-        print(tuple(orbs), tuple(shifts))
+        print(tuple(orbs), tuple(shifts), f'{(time.thread_time_ns()-t0)/1000000:.1f}ms')
         for i in range(60):  # simulate YOLO as lower speed
             c = next(images)
             hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
@@ -227,7 +237,8 @@ try:
                         shift.box = (max(0,int(orb.pos[0] - box[2]/2)), max(0,int(orb.pos[1]-box[3]/2)), box[2], box[3])
                 mask |= shift.src
                 xyxy_hsv = transform_xyxy(shift.box)
-                cv2.rectangle(c, xyxy_hsv[:2], xyxy_hsv[2:], 255, 2)
+                cv2.rectangle(c, xyxy_hsv[:2], xyxy_hsv[2:], (0, 0, 255), 2)
+                cv2.putText(c, 'id=%d' % Id, xyxy_hsv[:2], cv2.FONT_HERSHEY_SIMPLEX, 0.75, (Id*2, Id*2, 200-2*Id), 2)
 
             for Id, orb in orbs.items():
                 roi_pad = padROI(orb.get_roi(size), pads, size)
@@ -244,6 +255,7 @@ try:
                 except cv2.error:
                     pass
 
+            c = yolo.draw(c)
             cv2.imshow('det', c)
             cv2.imshow('shift', mask)
             out_put.write(c)
