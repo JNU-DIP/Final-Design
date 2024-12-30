@@ -31,7 +31,7 @@ joblib
 kiwisolver
 lazy_loader
 MarkupSafe~=2.1.5
-mpmath~=1.2.1
+mpmath~=1.3.0
 networkx~=3.4.2
 opencv-contrib-python>=4.10.0.84
 pluggy>=1.5.0
