@@ -30,7 +30,7 @@ jinxed>=1.3.0
 joblib
 kiwisolver
 lazy_loader
-MarkupSafe~=2.1.5
+MarkupSafe~=3.0.2
 mpmath~=1.2.1
 networkx~=3.4.2
 opencv-contrib-python>=4.10.0.84
