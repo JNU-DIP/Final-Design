@@ -41,7 +41,7 @@ python-dateutil
 readchar
 requests
 revel
-scikit-image<=0.24.0
+scikit-image<=0.25.0
 scikit-learn~=1.6.0
 six
 threadpoolctl~=3.5.0
