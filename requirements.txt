@@ -20,7 +20,7 @@ contourpy>=1.0.5
 cycler>=0.11.0
 exceptiongroup
 filelock~=3.16.1
-fonttools~=4.37.4
+fonttools~=4.55.3
 fsspec
 idna~=3.10
 imageio~=2.36.1
