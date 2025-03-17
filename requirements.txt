@@ -19,7 +19,7 @@ colorama>=0.4.6
 contourpy>=1.0.5
 cycler>=0.11.0
 exceptiongroup
-filelock~=3.16.1
+filelock~=3.18.0
 fonttools~=4.37.4
 fsspec
 idna~=3.10
