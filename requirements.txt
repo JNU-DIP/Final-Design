@@ -50,4 +50,4 @@ tomli
 torch<=2.6.0.*
 torchaudio<=2.6.0.*
 torchvision<=0.22.0.*
-typing_extensions<=4.12.2
+typing_extensions<=4.13.2
