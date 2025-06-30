@@ -32,7 +32,7 @@ kiwisolver
 lazy_loader
 MarkupSafe~=2.1.5
 mpmath~=1.2.1
-networkx~=3.4.2
+networkx~=3.2.1
 opencv-contrib-python>=4.10.0.84
 pluggy>=1.5.0
 pyparsing
